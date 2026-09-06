@@ -263,9 +263,8 @@ def main():
                              "to fine-tune the V1 model (model.ckpt) instead.")
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--patience", type=int, default=25,
-                        help="Early-stopping patience in epochs (0 disables early stop; the "
-                             "default matches max_epochs so a run completes all 25 epochs).")
+    parser.add_argument("--patience", type=int, default=5,
+                        help="Early-stopping patience in epochs (default: 5; 0 disables early stop).")
     parser.add_argument("--val-time-samples", type=int, default=None,
                         help="Independent diffusion-time samples averaged per validation batch "
                              "(default: validation.time_samples from config).")

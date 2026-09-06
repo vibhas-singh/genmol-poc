@@ -4,44 +4,47 @@ Fine-tune the pretrained **NVIDIA GenMol** discrete-diffusion model on a focused
 dataset (**Delaney / ESOL**) and evaluate whether the fine-tuned model generates **valid, novel,
 drug-like** molecules aligned to the target chemical domain. Designed to run on **one A100 GPU via Slurm**.
 
-> Emphasis of this PoC is the **approach and pipeline**, not leaderboard accuracy.
-
 GenMol is a masked discrete-diffusion model over **SAFE** molecular sequences with a BERT
 backbone. Fine-tuning continues from the pretrained backbone and EMA with a lower learning rate,
 short warmup, and reset EMA history so generation weights can track a short domain adaptation run.
 
 ## Index
 
-- [Assignment description](#assignment-description)
-- [Pipeline flow](#pipeline-flow)
-- [Beyond the assignment brief](#beyond-the-assignment-brief)
-- [Dataset source and profile](#dataset-source-and-profile)
-- [Repository layout](#repository-layout)
-- [0. Get the code and data](#0-get-the-code-and-data)
-- [1. Environment setup](#1-environment-setup)
-  - [Pretrained checkpoint](#pretrained-checkpoint)
-- [2. Run the pipeline — Slurm-first](#2-run-the-pipeline--slurm-first)
-  - [A. Slurm batch — recommended](#a-slurm-batch--recommended)
-  - [B. Interactive allocation](#b-interactive-allocation)
-  - [C. Manual commands and stage reference](#c-manual-commands-and-stage-reference)
-- [3. (Optional) Hyperparameter sweep](#3-optional-hyperparameter-sweep)
-  - [Model selection criteria](#model-selection-criteria)
-- [4. Evaluation criteria](#4-evaluation-criteria)
-- [5. Limitations](#5-limitations)
-- [6. Recommended next steps](#6-recommended-next-steps)
-- [Experiment tracking / run records](#experiment-tracking--run-records)
-- [Reproducibility](#reproducibility)
-- [GenMol V1 vs V2](#genmol-v1-vs-v2)
-- [Experiments & Results](#experiments--results)
-  - [Train-Val Split Distribution](#train-val-split-distribution)
-  - [Experiment 1: Original LR](#experiment-1-lr1e-4-original-lr)
-  - [Experiment 2: Lower LR](#experiment-2-lr2e-5-lower-lr)
-  - [Experiment 3: First 9 Layers Frozen](#experiment-3-lr1e-4-first-9-layers-frozen)
-  - [Comparison of Experiments](#comparison-of-experiments)
-- [Metric definitions](#metric-definitions)
-- [Known issues & bugs found](#known-issues--bugs-found)
+- [1. Project overview](#1-project-overview)
+  - [Assignment and deliverables](#assignment-and-deliverables)
+  - [Pipeline and design decisions](#pipeline-and-design-decisions)
+  - [Dataset](#dataset)
+  - [Repository layout](#repository-layout)
+- [2. Setup](#2-setup)
+  - [Get the code and data](#get-the-code-and-data)
+  - [Create the environment](#create-the-environment)
+  - [Download a pretrained checkpoint](#download-a-pretrained-checkpoint)
+- [3. Run the pipeline](#3-run-the-pipeline)
+  - [Slurm batch (recommended)](#slurm-batch-recommended)
+  - [Interactive allocation](#interactive-allocation)
+  - [Manual stage-by-stage run](#manual-stage-by-stage-run)
+  - [Optional hyperparameter sweep](#optional-hyperparameter-sweep)
+- [4. Evaluation framework](#4-evaluation-framework)
+  - [Success criteria](#success-criteria)
+  - [Limitations](#limitations)
+  - [Recommended next steps](#recommended-next-steps)
+- [5. Run management](#5-run-management)
+  - [Experiment tracking](#experiment-tracking)
+  - [Reproducibility](#reproducibility)
+  - [GenMol V1 vs V2](#genmol-v1-vs-v2)
+- [6. Experiments and results](#6-experiments-and-results)
+  - [Train-validation split](#train-validation-split)
+  - [Experiment 1: full fine-tuning](#experiment-1-full-fine-tuning)
+  - [Experiment 2: lower learning rate](#experiment-2-lower-learning-rate)
+  - [Experiment 3: frozen layers](#experiment-3-frozen-layers)
+  - [Comparison and conclusion](#comparison-and-conclusion)
+- [7. Reference](#7-reference)
+  - [Metric definitions](#metric-definitions)
+  - [Known upstream issues](#known-upstream-issues)
 
-## Assignment description
+## 1. Project overview
+
+### Assignment and deliverables
 
 **Task:** Small Molecule Design
 
@@ -69,7 +72,7 @@ to the chosen chemical domain.
 
 **Evaluation emphasis:** The focus is on the **approach**, rather than accuracy alone.
 
-## Pipeline flow
+### Pipeline and design decisions
 
 The whole fine-tuning pipeline is three seeded stages — **prepare → fine-tune → generate/evaluate** —
 that every run method (Slurm, interactive, or manual) executes identically:
@@ -79,12 +82,12 @@ flowchart TD
     A[Delaney / ESOL CSV<br/>1128 molecules] --> B[prepare_data.py<br/>canonicalize · validity filter · dedupe]
     B --> C[Bemis–Murcko scaffold split<br/>951 train / 105 val · frozen on disk]
     C --> D[SMILES → SAFE encoding<br/>train.safe + val.safe]
-    D --> E[finetune.py<br/>load pretrained GenMol + EMA<br/>lr 1e-4 · 25 epochs]
+    D --> E[finetune.py<br/>load pretrained GenMol + EMA<br/>lr 1e-4 · up to 25 epochs]
     E --> F[Validation every epoch on val.safe<br/>val_loss · 4 diffusion-time samples<br/>on EMA shadow weights]
-    F --> G[best.ckpt<br/>ModelCheckpoint = min val_loss<br/>EarlyStopping patience 25]
+    F --> G[best.ckpt<br/>ModelCheckpoint = min val_loss<br/>EarlyStopping patience 5]
     G --> H[generate_evaluate.py<br/>base vs fine-tuned]
     H --> I[De novo sampling<br/>shared SAFE length prior<br/>identical seeded length draws]
-    I --> J[Metrics<br/>validity · uniqueness · novelty<br/>QED · SA · diversity · drug-like<br/>nearest-reference sim · FCD]
+    I --> J[Metrics<br/>validity · uniqueness · novelty<br/>QED · SA · diversity · drug-like<br/>nearest-validation sim · FCD-to-validation]
     J --> K[Outputs<br/>comparison.csv · property overlays · molecule grid]
 ```
 
@@ -99,9 +102,10 @@ flowchart TD
 - **Controlled sampling** — base and fine-tuned models draw from the **same seeded SAFE length prior**,
   so metric differences reflect *token predictions*, not a size confound.
 - **Distribution-shift evaluation** — beyond validity/QED/SA, we report **novelty, diversity,
-  nearest-reference Tanimoto, and FCD** to measure movement toward the target domain.
+  nearest-validation Tanimoto, and FCD to the scaffold-held-out validation distribution** to
+  measure movement toward the target domain.
 
-## Beyond the assignment brief
+#### What this PoC adds beyond the brief
 
 The brief asked for a fine-tuning run, Slurm scripts, data preparation, and a presentation. This
 PoC also includes:
@@ -114,7 +118,7 @@ PoC also includes:
   instead of the broken upstream `UserDataset`, without modifying vendored GenMol.
 - **Controlled generation lengths:** base and fine-tuned models use identical seeded draws from the
   ESOL SAFE-length distribution, isolating token-level changes from length effects.
-- **Expanded evaluation:** FCD, nearest-reference ECFP4 similarity, internal diversity, QED/MW/logP
+- **Expanded evaluation:** FCD-to-validation, nearest-validation ECFP4 similarity, internal diversity, QED/MW/logP
   overlays, and a labelled five-molecule grid supplement validity, QED, and SA.
 - **Small-data regularization:** `--freeze-layers` adapts only the upper transformer layers and MLM
   head, with checkpoint-compatible EMA handling.
@@ -122,14 +126,14 @@ PoC also includes:
   unhealthy runs and ranks survivors with a memorization-aware composite score.
 - **Offline experiment tracking:** each run writes a summary, loss history, checkpoint metadata,
   and a row in the central run registry without requiring an external service.
-- **Held-out reference metrics:** `--ref-smiles val_smiles.txt` avoids rewarding similarity to exact
-  training molecules during model selection.
+- **Held-out generation metrics:** the scaffold-held-out split is used for validation loss,
+  `best.ckpt` selection, nearest-neighbour similarity, and FCD; novelty remains training-set based.
 - **Reproducibility controls:** all stages are seeded, with deterministic Lightning execution where
   supported by the CUDA kernels.
 - **End-to-end V1/V2 support:** checkpoint paths, SAFE mode, and sampling defaults switch together.
 - **Smoke-test path:** `SMOKE=1` runs a short end-to-end interactive check before a full A100 job.
 
-## Dataset source and profile
+### Dataset
 
 **Source:** the [Delaney aqueous-solubility dataset](https://raw.githubusercontent.com/deepchem/deepchem/master/datasets/delaney-processed.csv)
 distributed by DeepChem. It contains 1,128 molecules with measured solubility and molecular
@@ -160,14 +164,17 @@ are absent from training. Use `--split random` only when a scaffold-disjoint spl
 The resulting domain is a broad, compact, low-molecular-weight, lead-like distribution rather
 than a target-specific chemotype. Domain alignment therefore means movement in fingerprint and
 property distributions, not improved biological activity or solubility. See
-[Limitations](#5-limitations) for the implications.
+[Limitations](#limitations) for the implications.
 
-## Repository layout
+### Repository layout
 
 ```
 genmol-poc/
+├── README.md                         # setup, execution, evaluation, and results
+├── setup.sh                          # create the environment and install dependencies
 ├── data/
 │   └── delaney-processed.csv         # raw dataset (external to the model repo)
+├── images/                           # result figures referenced by this README
 ├── models/                           # pretrained checkpoints (from NGC)
 │   ├── genmol_v1_v1.0/model.ckpt
 │   └── genmol_v2_v1.0/model_v2.ckpt
@@ -185,11 +192,14 @@ genmol-poc/
     │   ├── evaluate.slurm            # generation + comparison on 1 A100
     │   ├── sweep.slurm               # array sweep (freeze x lr), one run per task
     │   └── run_interactive.sh        # full pipeline in an salloc/srun --pty session
-    ├── presentation/presentation.md  # Marp slide deck (deliverable)
     └── outputs/                      # generated data, checkpoints, metrics (created at runtime)
 ```
 
-## 0. Get the code and data
+## 2. Setup
+
+Complete these steps once before running the pipeline.
+
+### Get the code and data
 
 From the workspace root (`genmol-poc/`):
 
@@ -204,28 +214,27 @@ curl -sL https://raw.githubusercontent.com/deepchem/deepchem/master/datasets/del
 wc -l data/delaney-processed.csv     # ~1129 lines (1128 molecules + header)
 ```
 
-The pretrained checkpoints are downloaded separately (see [Pretrained checkpoint](#pretrained-checkpoint)
-below) into `models/`.
+Download the pretrained checkpoints separately into `models/` as described in
+[Download a pretrained checkpoint](#download-a-pretrained-checkpoint).
 
-## 1. Environment setup
+### Create the environment
 
 GenMol targets Python 3.10 + CUDA (A100). On the cluster:
 
 ```bash
 # from the workspace root (genmol-poc/)
-cd genmol
-bash env/setup.sh                     # creates the `genmol` conda env (Python 3.10) and installs all packages
+bash setup.sh                         # creates the `genmol` conda env and installs GenMol + PoC dependencies
 source ~/.bashrc                      # reload the shell so `conda activate` picks up the new env
 conda activate genmol
-bash env/fix_safe_imports.sh          # required: works around a safe-mol/transformers import error (see below)
+bash genmol/env/fix_safe_imports.sh   # required: works around a safe-mol/transformers import error (see below)
 ```
 
 Key dependencies (pinned in `genmol/env/requirements.txt`): `torch==2.6.0`, `transformers`,
 `lightning`, `bionemo-moco`, `safe-mol`, `pytdc`, `rdkit`. See
-[Known issues & bugs found](#known-issues--bugs-found) for a `transformers` version-pin
+[Known upstream issues](#known-upstream-issues) for a `transformers` version-pin
 inconsistency between `requirements.txt` and `pyproject.toml` that affects this install.
 
-### Pretrained checkpoint
+### Download a pretrained checkpoint
 
 The GenMol weights are **public** on the NGC catalog
 ([nvidia/clara/genmol_v1](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/clara/resources/genmol_v1))
@@ -265,14 +274,14 @@ cd ..
 The PoC defaults to **V2** (`models/genmol_v2_v1.0/model_v2.ckpt`); V1 lives at
 `models/genmol_v1_v1.0/model.ckpt`. Override the location with `PRETRAINED_CKPT` if needed.
 
-## 2. Run the pipeline — Slurm-first
+## 3. Run the pipeline
 
 Run the pipeline on **one A100 via Slurm** after completing the environment setup above. Slurm
 batch is the recommended path for cluster scheduling; interactive and manual alternatives follow.
 Slurm batch and the interactive script prepare data automatically. The manual Python method
 requires an explicit preparation command.
 
-### A. Slurm batch — recommended
+### Slurm batch (recommended)
 
 ```bash
 cd /path/to/genmol-poc
@@ -294,7 +303,7 @@ data automatically, so there is no need to run the manual data-preparation comma
 Unless `CHECKPOINT_DIR` or `FINETUNED_CKPT` is set, `evaluate.slurm` automatically evaluates the
 newest `poc/outputs/finetune_*/checkpoints` directory.
 
-### B. Interactive allocation
+### Interactive allocation
 
 Run the pipeline script inside an `salloc`/`srun --pty` session:
 
@@ -302,12 +311,12 @@ Run the pipeline script inside an `salloc`/`srun --pty` session:
 salloc --partition=gpu --gres=gpu:a100:1 --cpus-per-task=16 --mem=64G --time=02:00:00
 conda activate genmol
 bash poc/slurm/run_interactive.sh          # data prep -> fine-tune -> evaluate
-# SMOKE=1 bash poc/slurm/run_interactive.sh  # quick end-to-end test (50 steps, 100 samples)
+# SMOKE=1 bash poc/slurm/run_interactive.sh  # quick end-to-end test (2 epochs, 100 samples)
 ```
 
 `run_interactive.sh` also prepares the data automatically.
 
-### C. Manual commands and stage reference
+### Manual stage-by-stage run
 
 Only the manual Python method requires you to invoke each stage explicitly. Run all commands from
 the workspace root (`genmol-poc/`) and follow
@@ -332,7 +341,7 @@ the Slurm job) reuse them and skip regeneration, so train/val stay identical acr
 and evaluation. Pass `--force` to regenerate.
 
 For local SAFE files, training uses this PoC's scalar-indexed dataset instead of upstream
-`UserDataset`; see [Known issues & bugs found](#known-issues--bugs-found).
+`UserDataset`; see [Known upstream issues](#known-upstream-issues).
 
 #### Step 2: Fine-tuning (1 A100)
 
@@ -343,7 +352,7 @@ python poc/scripts/finetune.py \
     --out-dir poc/outputs/finetune_local
 ```
 
-Default settings from [configs/finetune.yaml](configs/finetune.yaml):
+Default settings from [poc/configs/finetune.yaml](poc/configs/finetune.yaml):
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |
@@ -351,14 +360,16 @@ Default settings from [configs/finetune.yaml](configs/finetune.yaml):
 | Global batch | 64 | about 14 optimizer steps per epoch |
 | Learning rate | `1e-4` | adapt without overwriting pretrained chemistry |
 | Warmup | 50 steps | short warmup for the small dataset |
-| Training | 25 epochs | about 375 optimizer steps |
+| Maximum training | 25 epochs | cap of about 375 optimizer steps |
 | Validation | every epoch, 4 time samples | stabilize `val_loss` checkpoint ranking |
+| Early stopping | patience 5 | stop after 5 validation epochs without improvement |
 | EMA decay | `0.99` | track short-run adaptation faster than pretraining EMA |
 | Precision / hardware | bf16 / 1 A100 | target execution environment |
 
-The lowest-`val_loss` EMA weights are saved as `best.ckpt` and used for generation. The default
-`--patience 25` allows all epochs; lower it for practical early stopping. Use `--ema-decay 0` for
-live weights or `--no-use-bracket-safe` with the V1 checkpoint.
+The lowest-`val_loss` EMA weights are saved as `best.ckpt` and used for generation. Training stops
+after five consecutive validation epochs without improvement, up to the 25-epoch cap. Pass
+`--patience 0` to disable early stopping. Use `--ema-decay 0` for live weights or
+`--no-use-bracket-safe` with the V1 checkpoint.
 
 Before fitting, the script evaluates the pretrained model on the full validation set. This
 `baseline_val_loss` appears in `run_summary.json` and on `loss_curves.png`, providing a step-zero
@@ -417,8 +428,8 @@ GenMol's original prior, `--length-safe` for another dataset, or `--min-add-len`
 minimum in single-checkpoint mode.
 
 Computes **validity, uniqueness, novelty, QED, SA score, diversity, drug-like fraction**,
-**mean nearest-neighbour Tanimoto similarity**, and (if `fcd_torch` is installed) **FCD** against
-the selected reference set for both models. Outputs to `--out-dir`:
+**mean nearest-validation Tanimoto similarity**, and (if `fcd_torch` is installed) **FCD against
+the scaffold-held-out validation set** for both models. Outputs to `--out-dir`:
 
 - `comparison.csv` / `comparison.json` — the metric table, including `length_prior` and `min_add_len`
 - `five_examples.csv` + `five_examples.png` — up to five novel showcase molecules satisfying
@@ -430,15 +441,13 @@ the selected reference set for both models. Outputs to `--out-dir`:
 > `matplotlib` (both in the genmol env), and **FCD** needs `pip install fcd_torch` — if absent,
 > that step is skipped with a message and the rest still runs.
 
-**Reference set.** Novelty is always measured against the training set. FCD and nearest-neighbour
-similarity use `--ref-smiles` (default: `--train-smiles`); pass `--ref-smiles poc/outputs/data/val_smiles.txt`
-to score domain match against the **held-out** validation set instead (recommended when the same
-metrics drive model selection). The output column retains the historical name
-`nearest_train_sim`, but it means nearest-selected-reference similarity whenever `--ref-smiles`
-is supplied. The provided Slurm and interactive workflows use `val_smiles.txt`; only direct calls
-that omit `--ref-smiles` fall back to the training reference.
+**Metric reference sets.** Novelty is measured against `train_smiles.txt`. In the commands and
+provided Slurm workflows, `--ref-smiles val_smiles.txt` makes nearest-neighbour similarity and FCD
+use the scaffold-held-out validation set. The CSV field retains the historical name
+`nearest_train_sim`, but with `--ref-smiles` it contains nearest-validation similarity. Validation
+loss also uses `val.safe` for checkpoint selection.
 
-## 3. (Optional) Hyperparameter sweep
+### Optional hyperparameter sweep
 
 A separate **orchestration layer** that reuses the single-run scripts unchanged: each Slurm
 array task fine-tunes + evaluates one `(freeze-layers, lr)` combination, then an aggregator ranks
@@ -457,7 +466,7 @@ sbatch --dependency=afterok:$SID --wrap "python poc/scripts/aggregate_sweep.py p
   `run_summary.json` (losses + early-stop step), `metrics/` (loss curves), and `eval/comparison.json`.
 - **Selection** (`aggregate_sweep.py` → `sweep_results.csv`): gates on validity/novelty, then ranks
   by a composite of drug-likeness + novelty + diversity with a **memorization penalty**
-  (high nearest-reference similarity) and an FCD bonus; `val_loss` is only a tie-breaker (it's noisy
+  (high nearest-validation similarity) and an FCD-to-validation bonus; `val_loss` is only a tie-breaker (it's noisy
   on the small val set). Re-run the final eval on the selected `best.ckpt` with full
   `--num-samples 1000`.
 
@@ -465,7 +474,7 @@ The `0-8` Slurm array maps the nine tasks to the `3 × 3` grid and runs each on 
 `--array=0-8%2` to limit concurrency; resize the array when changing the grid. Logs are written to
 `logs/sweep_%A_%a.out`, and the aggregation dependency waits for the full array.
 
-### Model selection criteria
+#### Model selection criteria
 
 Each run contributes its lowest-`val_loss` `best.ckpt`. `aggregate_sweep.py` first requires
 `validity ≥ 0.9`, `novelty ≥ 0.8`, and no validity, novelty, or drug-likeness degradation beyond
@@ -476,18 +485,20 @@ score = drug_like_frac + 0.5 * novelty + 0.25 * diversity
   - max(0, nearest_ref_sim_mean - 0.8) + 0.25 / (1 + fcd)
 ```
 
-The FCD bonus is included only when `fcd_torch` is available. Lower `val_loss` breaks score ties.
-FCD and nearest-neighbour similarity use the scaffold-held-out validation set; novelty remains
-measured against training. `sweep_results.csv` includes base metrics and base-to-fine-tuned deltas.
+The FCD bonus is included only when `fcd_torch` is available. Lower scaffold-validation loss
+breaks score ties. FCD and nearest-neighbour similarity use the scaffold-held-out validation set;
+novelty uses the training set. `sweep_results.csv` includes base metrics and base-to-fine-tuned deltas.
 
-## 4. Evaluation criteria
+## 4. Evaluation framework
 
-Treat the fine-tune as successful when the reported results improve domain alignment (lower FCD,
-higher nearest-reference similarity, or closer QED/MW/logP distributions) while maintaining
+### Success criteria
+
+Treat the fine-tune as successful when the reported results improve domain alignment (lower
+FCD-to-validation, higher nearest-validation similarity, or closer QED/MW/logP distributions) while maintaining
 `validity ≥ 0.9`, `novelty ≥ 0.8`, and no material collapse in diversity. Interpret every result
 with its reference set, length prior, sampling configuration, and random seed.
 
-## 5. Limitations
+### Limitations
 
 - **Small, broad dataset:** 1,056 molecules and 105 validation examples leave substantial variance
   and risk of overfitting or mode collapse, even with a scaffold split, EMA, and layer freezing.
@@ -503,8 +514,19 @@ with its reference set, length prior, sampling configuration, and random seed.
   materially change metrics, so conclusions depend on the reported sampling configuration.
 - **Stochastic uncertainty:** seeded runs improve comparability, but stochastic diffusion-time
   sampling and bf16/CUDA kernels limit exact repeatability and require multi-seed confirmation.
+- **Validation set is double-used:** `val.safe` drives both checkpoint selection (early stopping /
+  `best.ckpt`) and the reported domain-alignment metrics (nearest-validation similarity, FCD-to-validation),
+  which optimistically biases those numbers; a true 3-way train/val/test split would isolate selection
+  from final evaluation.
+- **No uncertainty quantification on metrics:** all reported deltas (validity, novelty, similarity,
+  FCD, etc.) are single-seed point estimates over one sample of 1,000 generations with no
+  bootstrapped confidence intervals, so small deltas (e.g. the +0.086 nearest-validation similarity
+  change) cannot currently be distinguished from noise.
+- **Small FCD reference set:** FCD is computed against a 105-molecule validation set, well below the
+  sample sizes (typically thousands) FCD is usually reported with, so the absolute FCD values are
+  likely noisy/biased even though the base-vs-fine-tuned direction is informative.
 
-## 6. Recommended next steps
+### Recommended next steps
 
 | Priority | Action | Decision or output |
 | ---: | --- | --- |
@@ -515,8 +537,15 @@ with its reference set, length prior, sampling configuration, and random seed.
 | 5 | Compare regularization strategies | Benchmark full fine-tuning, layer freezing, and LoRA/PEFT under the same seeds and evaluation protocol. |
 | 6 | Add chemistry checks and generation guardrails | Measure scaffold novelty, Lipinski/PAINS alerts, retrosynthesis feasibility, ADMET or docking endpoints, strict train-set deduplication, and repeated fragments. |
 | 7 | Add goal-directed generation | Evaluate GenMol PMO or fragment remasking against explicit property or docking objectives. |
+| 8 | Split off a third, untouched test set | Use val only for checkpoint selection; report final nearest-neighbour similarity and FCD against the held-out test set instead. |
+| 9 | Bootstrap confidence intervals on all comparison metrics | Resample the generated sets (e.g. 1,000x with replacement) to attach CIs to validity/novelty/QED/SA/similarity/FCD deltas before claiming improvement. |
+| 10 | Grow the FCD/similarity reference set | Pool a larger external reference (e.g. a wider ChEMBL-derived set in the same property range) alongside val to stabilize FCD, which is unreliable below roughly 1-2k molecules. |
+| 11 | Test QED/SA gains as domain alignment vs. generic simplification | Fine-tuned QED (~0.66) and SA (~1.77) overshoot both train (0.560 / 2.32) and val (0.580 / 2.88), so the shift may be simplification/mode collapse away from the ESOL distribution rather than alignment; report per-property distance to the target distribution and treat FCD / nearest-validation similarity as the primary alignment signal. |
+| 12 | Use a group-randomized scaffold split instead of largest-group-to-train | The current largest-first assignment sends rare/larger scaffolds to val (val avg_tokens 35.9 vs train 26.0), creating a systematic size/property shift in the held-out reference; randomize whole-scaffold-group assignment to keep train/val distributions comparable while staying scaffold-disjoint. |
 
-## Experiment tracking / run records
+## 5. Run management
+
+### Experiment tracking
 
 Every `finetune.py` run (single or sweep task) persists its own record — no external tracker needed:
 
@@ -540,7 +569,7 @@ cat poc/outputs/<run>/run_summary.json                   # one run
 Hosted tracking through a Lightning logger such as W&B or MLflow is a possible future extension;
 the current implementation is intentionally file-based and offline.
 
-## Reproducibility
+### Reproducibility
 
 Every stage takes a `--seed` (default `42`):
 
@@ -555,7 +584,7 @@ Note: exact bit-for-bit reproducibility isn't guaranteed under bf16 + CUDA (some
 deterministic implementations, and MDLM uses random time sampling), but results are stable and
 repeatable run-to-run.
 
-## GenMol V1 vs V2
+### GenMol V1 vs V2
 
 To run **V1** (standard SAFE) instead:
 
@@ -566,13 +595,19 @@ To run **V1** (standard SAFE) instead:
 - **Slurm:** submit either script with `MODEL_VERSION=v1`, e.g.
   `sbatch --export=ALL,MODEL_VERSION=v1 poc/slurm/finetune.slurm`.
 
-## Experiments & Results
-### Train-Val Split Distribution
-> TRAIN: valid=949  QED_mean=0.560  SA_mean=2.316  avg_tokens=26.0  drug_like_frac=0.305
+## 6. Experiments and results
+
+> **Reference sets used for these results:** novelty is computed against `train_smiles.txt`.
+> Because the workflow passes `--ref-smiles val_smiles.txt`, similarity and FCD are computed
+> against the scaffold-held-out validation set. The output key `nearest_train_sim` is historical
+> and is misleading when this override is present.
+
+### Train-validation split
+> TRAIN: valid=951  QED_mean=0.560  SA_mean=2.316  avg_tokens=26.0  drug_like_frac=0.305
 
 > VAL: valid=105  QED_mean=0.580  SA_mean=2.882  avg_tokens=35.9  drug_like_frac=0.390
 
-### Experiment 1 (LR=1e-4, Original LR)
+### Experiment 1: full fine-tuning
 * Full finetuning
 * LR = 1e-4
 #### Train and Val Loss Curves
@@ -587,26 +622,26 @@ To run **V1** (standard SAFE) instead:
 | **Novelty**                       |                           93.9% |                             **85.0%** | Novelty decreases as expected when specializing toward a small training set, but 85% of outputs are still unseen molecules                             | 🟢 **Strong novelty retained**                        |
 | **Uniqueness**                    |                           84.7% |                             **69.0%** | Noticeable reduction; fine-tuning concentrates probability around a narrower region of chemical space                                                  | 🟡 **Main trade-off**                                 |
 | **Diversity**                     |                           0.909 |                             **0.865** | Moderate reduction, consistent with domain specialization                                                                                              | 🟡 **Slightly reduced**                               |
-| **QED / drug-likeness**           |                           0.572 |                             **0.664** | Mean QED increases materially (+0.092); generated molecules become more drug-like by this metric                                                       | 🟢 **Improved**                                       |
-| **Synthetic accessibility (SA)**  |                           2.394 |                             **1.765** | Lower SA is better; fine-tuned molecules are substantially easier to synthesize according to the metric                                                | 🟢 **Strong improvement**                             |
-| **Drug-like fraction**            |                           34.1% |                             **41.7%** | +7.6 percentage points despite the small dataset                                                                                                       | 🟢 **Improved**                                       |
-| **Similarity to training domain** |                           0.203 |                             **0.289** | ~43% increase in nearest-training-set similarity demonstrates movement toward the target chemical space                                                | 🟢 **Clear domain shift**                             |
-| **Distribution alignment (FCD)**  |                           24.44 |                             **22.40** | Lower FCD indicates the generated distribution moves closer to the reference domain                                                                    | 🟢 **Improved domain alignment**                      |
-| **Memorization risk**             |                               — |         Novelty 85%, similarity 0.289 | Similarity increases without collapsing into copies of the training molecules                                                                          | 🟢/🟡 **Specialization without obvious memorization** |
-| **Checkpoint selection**          |                               — |             **Epoch 8 / `best.ckpt`** | Later training improves training loss but worsens validation loss; last checkpoint also has worse novelty, uniqueness, QED, drug-like fraction and FCD | 🟢 **Early stopping justified**                       |
+| **QED / drug-likeness**           |                           0.572 |                             **0.664** | Mean QED rises +0.092, but **overshoots** both train (0.560) and val (0.580): if the target is the ESOL distribution, moving *above* it is a mismatch, not alignment. Likely a generic "niceness"/simplification effect, not faithful domain adaptation | 🟡 **Simplification, not alignment** |
+| **Synthetic accessibility (SA)**  |                           2.394 |                             **1.765** | Lower SA looks better in isolation, but 1.77 sits *below* both train (2.32) and val (2.88): the model drifts toward simpler-than-domain molecules, consistent with mode collapse rather than matching ESOL | 🟡 **Simplification, not alignment** |
+| **Drug-like fraction**            |                           34.1% |                             **41.7%** | +7.6 pp, but driven by the same QED/SA overshoot above; reflects a shift toward small, easy, high-QED molecules rather than the ESOL descriptor profile | 🟡 **Confounded with simplification** |
+| **Similarity to held-out domain** |                           0.203 |                             **0.289** | +0.086 (~43% relative) nearest-validation similarity is the *primary* alignment signal (QED/SA are not) and moves clearly toward the held-out domain | 🟢 **Clear domain shift** |
+| **Distribution alignment (FCD)**  |                           24.44 |                             **22.40** | Lower FCD-to-validation is the other genuine alignment signal and moves the same direction, corroborating the similarity gain | 🟢 **Improved domain alignment** |
+| **Memorization risk**             |                               — |         Novelty 85%, similarity 0.289 | The novelty rate shows limited exact copying, but scaffold or close-analogue memorization was not measured                                               | 🟡 **Further analysis required**                     |
+| **Checkpoint selection**          |                               — |             **Epoch 8 / `best.ckpt`** | Later training improves training loss but worsens validation loss; last checkpoint also has worse novelty, uniqueness, QED, drug-like fraction and FCD | 🟢 **Best-checkpoint selection justified**            |
 | **Overall PoC objective**         |       General-purpose generator |         More domain-focused generator | Fine-tuning shifts GenMol toward the focused dataset while retaining high validity and substantial novelty                                             | 🟢 **PoC successful**                                 |
 
 #### Conclusion
-Fine-tuning GenMol on a small focused molecular dataset produced a measurable shift toward the target chemical space. The selected epoch-8 checkpoint improves FCD, training-set similarity, QED, synthetic accessibility and drug-like fraction relative to the pretrained model, while maintaining 97.5% validity and 85.0% novelty.
+Fine-tuning GenMol on a small focused molecular dataset produced a measurable change in the generated distribution while maintaining 97.5% validity and 85.0% novelty. Importantly, the QED (+0.092), SA (−0.629) and drug-like (+7.6 pp) gains **overshoot** the train/val targets (fine-tuned QED 0.664 > val 0.580; SA 1.77 < train 2.32), so they most likely reflect a generic simplification / partial mode-collapse toward small, easy, high-QED molecules — reinforced by the drop in uniqueness (85→69%) and diversity — rather than faithful ESOL adaptation. The two metrics that directly measure alignment, nearest-validation similarity (+0.086, ~43% relative) and FCD-to-validation (−2.0), both move toward the held-out domain and corroborate each other, which is the genuine positive signal. **FCD/similarity carry the alignment claim; QED/SA should be read as simplification signals.**
 
-Fine-tuning does reduce uniqueness and diversity, and continued training beyond epoch 8 causes additional degradation, highlighting the risk of overfitting on only ~950 training molecules. Overall, the experiment demonstrates that a pretrained GenMol model can be efficiently adapted on a single A100 to bias generation toward a customer-specific molecular domain without collapsing into memorization.
+Fine-tuning reduces uniqueness and diversity, and continued training beyond epoch 8 causes additional degradation, highlighting the risk of overfitting on only ~950 training molecules.
 
-Next steps: larger/scaffold-diverse fine-tuning data, scaffold-based held-out evaluation, multiple random seeds, generation-hyperparameter tuning, explicit solubility/property conditioning, and downstream docking/ADMET evaluation.
+Next steps: larger/scaffold-diverse fine-tuning data, multi-seed evaluation on the frozen scaffold split, an external held-out dataset, generation-hyperparameter tuning, explicit solubility/property conditioning, and downstream docking/ADMET evaluation.
 
 #### Generated Examples
 ![alt text](images/image_generated_exp1.png)
 
-| SMILES | QED | SA | Nearest Train Similarity |
+| SMILES | QED | SA | Nearest Validation Similarity |
 |---|---:|---:|---:|
 | `O=S(=O)(Nc1ccc(Br)cc1)c1ccccc1` | 0.9454 | 1.4803 | 0.2759 |
 | `Cn1cc(NC(=O)COc2ccc(Cl)cc2Cl)cn1` | 0.9443 | 1.9364 | 0.2424 |
@@ -614,7 +649,7 @@ Next steps: larger/scaffold-diverse fine-tuning data, scaffold-based held-out ev
 | `COc1ccc(NC(=O)c2ccc(Br)cc2)cc1` | 0.9385 | 1.3350 | 0.2500 |
 | `O=C(O)c1ccc(Oc2ccc(Br)cc2)cc1` | 0.9320 | 1.4694 | 0.2759 |
 
-### Experiment 2 (LR=2e-5, Lower LR)
+### Experiment 2: lower learning rate
 * Full Finetuning
 * LR = 2e-5 (reduced from 1e-4)
 
@@ -630,16 +665,16 @@ It retains:
 * more structural diversity
 * essentially perfect validity
 
-and still improves FCD substantially.
+and still improves FCD-to-validation substantially.
 
 But it produces a weaker adaptation signal on most molecule-level metrics:
 
 * QED improvement drops from +0.092 → +0.055
 * SA improvement drops from -0.629 → -0.316
 * drug-like improvement drops from +7.6 pp → +1.4 pp
-* nearest-train similarity increase drops from +0.086 → +0.044
+* nearest-validation similarity increase drops from +0.086 → +0.044
 
-### Experiment 3 (LR=1e-4, First 9 Layers Frozen)
+### Experiment 3: frozen layers
 * Freeze first 9 layers
 * LR = 1e-4
 
@@ -647,9 +682,9 @@ But it produces a weaker adaptation signal on most molecule-level metrics:
 ![alt text](images/image_loss_curves_exp3.png)
 
 #### Conclusion
-Freezing the first 9 layers still achieved meaningful domain adaptation, improving SA from 2.39 to 1.75 and increasing nearest-train similarity from 0.203 to 0.268. However, it reduced uniqueness and novelty more than the full fine-tuning runs and delivered a weaker FCD improvement. Overall, layer freezing did not provide a better adaptation–diversity trade-off, so full fine-tuning remains the preferred approach.
+Freezing the first 9 layers still achieved meaningful domain adaptation, improving SA from 2.39 to 1.75 and increasing nearest-validation similarity from 0.203 to 0.268. However, it reduced uniqueness and novelty more than the full fine-tuning runs and delivered a weaker FCD improvement. Overall, layer freezing did not provide a better adaptation–diversity trade-off, so full fine-tuning remains the preferred approach.
 
-### Comparison of Experiments
+### Comparison and conclusion
 #### Stats
 | Metric                   | Original LR Δ |   Lower LR Δ | Frozen-9 Δ |
 | ------------------------ | ------------: | -----------: | ---------: |
@@ -660,25 +695,34 @@ Freezing the first 9 layers still achieved meaningful domain adaptation, improvi
 | SA ↓                     |    **-0.629** |       -0.316 | **-0.647** |
 | Diversity ↑              |        -0.044 |   **-0.016** |     -0.034 |
 | Drug-like Fraction ↑     |   **+7.6 pp** |      +1.4 pp |    +1.5 pp |
-| Nearest Train Similarity |    **+0.086** |       +0.044 |     +0.065 |
-| FCD ↓                    |        -2.042 |   **-2.232** |     -1.478 |
+| Nearest-validation similarity | **+0.086** |       +0.044 |     +0.065 |
+| FCD-to-validation ↓      |        -2.042 |   **-2.232** |     -1.478 |
 
 #### Conclusion
 | Strategy                  | Behaviour                       | Strength                                              | Weakness                                           |
 | ------------------------- | ------------------------------- | ----------------------------------------------------- | -------------------------------------------------- |
 | **Original LR**           | Aggressive adaptation           | Best QED, drug-likeness, SA, strong domain shift      | Loses some novelty/diversity                       |
-| **Lower LR**              | Conservative adaptation         | Best validity, novelty, uniqueness, diversity and FCD | Weaker property/domain shift                       |
-| **Freeze first 9 layers** | Restrict representation updates | Very strong SA improvement                            | Largest loss of novelty/uniqueness with weaker FCD |
+| **Lower LR**              | Conservative adaptation         | Best validity, novelty, uniqueness, diversity and FCD-to-validation | Weaker property/domain shift                       |
+| **Freeze first 9 layers** | Restrict representation updates | Very strong SA improvement                            | Largest loss of novelty/uniqueness with weaker FCD-to-validation |
 | **Recommended**           | —                               | **Original or Lower LR**                              | Frozen run not preferred                           |
 
 
-## Final Conclusion
-The PoC demonstrates that NVIDIA GenMol can be successfully fine-tuned on a small, focused molecular dataset using a single A100 GPU to shift generation toward the target chemical domain while retaining strong generative quality. The selected full fine-tuning checkpoint improved QED from 0.572 → 0.664, SA from 2.394 → 1.765, drug-like fraction from 34.1% → 41.7%, nearest-training similarity from 0.203 → 0.289, and FCD from 24.44 → 22.40, while maintaining 97.5% validity and 85.0% novelty.
+#### Overall conclusion
+The experiments demonstrate that GenMol can be fine-tuned on ESOL using one A100 and that
+fine-tuning measurably changes its generated distribution. Full fine-tuning at `1e-4` produced the
+strongest improvements in QED, synthetic accessibility, drug-like fraction, and similarity to the
+scaffold-disjoint validation reference, while retaining 97.5% validity and 85.0% novelty. This
+adaptation came with reduced uniqueness and diversity.
 
-The main trade-off was a reduction in uniqueness and diversity, which is expected when adapting a large pretrained generative model to only ~950 training molecules. Learning-rate and layer-freezing ablations showed that a lower learning rate better preserves novelty and diversity, whereas stronger full fine-tuning provides greater domain specialization; freezing the first nine layers did not improve the overall trade-off. Overall, the PoC validates the approach and shows that GenMol can be effectively adapted to a customer-specific chemical space without collapsing into memorization, with further gains likely from larger and more diverse datasets, controlled generation, scaffold-aware evaluation, and downstream property/ADMET or docking-based optimization.
+A lower learning rate preserved generative diversity more effectively and achieved the best
+FCD-to-validation, whereas freezing nine layers did not improve the overall trade-off. These
+results support the feasibility of the approach, but multi-seed evaluation and an independent
+test set are required before making stronger generalization or memorization claims.
 
 
-## Metric definitions
+## 7. Reference
+
+### Metric definitions
 
 | Metric | Meaning |
 | --- | --- |
@@ -689,10 +733,10 @@ The main trade-off was a reduction in uniqueness and diversity, which is expecte
 | SA score | synthetic accessibility (1–10, lower = easier to synthesize) |
 | Diversity | mean pairwise Tanimoto distance within the generated set |
 | Drug-like fraction | fraction (0–1) with QED ≥ 0.6 **and** SA ≤ 4 (GenMol "quality") |
-| Nearest-reference similarity | mean max ECFP4 Tanimoto to the selected train or validation reference; interpret together with novelty |
-| FCD | Fréchet ChemNet Distance to the selected reference set (lower = closer distribution; optional `fcd_torch` dependency) |
+| Nearest-validation similarity | mean maximum ECFP4 Tanimoto similarity to a molecule in the scaffold-held-out validation set; stored under the historical `nearest_train_sim` key when `--ref-smiles` is used |
+| FCD-to-validation | Fréchet ChemNet Distance to the scaffold-held-out validation set (lower = closer distribution; optional `fcd_torch` dependency) |
 
-## Known issues & bugs found
+### Known upstream issues
 
 **In the upstream/vendored `genmol/` repo (not introduced by this PoC):**
 
@@ -706,7 +750,7 @@ The main trade-off was a reduction in uniqueness and diversity, which is expecte
 3. **SAFE import workaround.** Either transformers version can trigger
    `ImportError: cannot import name '_CONFIG_FOR_DOC' from 'transformers.models.gpt2.modeling_gpt2'`
   during `safe-mol` import. Run `genmol/env/fix_safe_imports.sh` as shown in
-  [Environment setup](#1-environment-setup).
+  [Create the environment](#create-the-environment).
 4. **Latent tokenizer mismatch.** `get_tokenizer()` always adds `<` and `>`, while
   `model.vocab_size` grows by two only for bracket SAFE. Standard V1 data does not use those tokens,
   so the mismatch is not currently triggered.

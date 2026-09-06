@@ -18,7 +18,7 @@ training:
 
 trainer:
   devices: 1            # single A100
-  max_epochs: 25        # run the full 25 epochs (patience defaults to 25, so no early stop)
+  max_epochs: 25        # epoch cap; early stopping defaults to 5 epochs without improvement
   precision: bf16
   log_every_n_steps: 1  # small dataset (~14 steps/epoch) -> log every step for full curves
   check_val_every_n_epoch: 1   # validate after every training epoch
