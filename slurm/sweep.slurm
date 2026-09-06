@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=genmol-sweep
-#SBATCH --partition=gpu              # <-- adjust to your cluster's A100 partition
+#SBATCH --partition=req-576              # <-- adjust to your cluster's A100 partition
 #SBATCH --gres=gpu:a100:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1

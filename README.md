@@ -308,7 +308,8 @@ newest `poc/outputs/finetune_*/checkpoints` directory.
 Run the pipeline script inside an `salloc`/`srun --pty` session:
 
 ```bash
-salloc --partition=gpu --gres=gpu:a100:1 --cpus-per-task=16 --mem=64G --time=02:00:00
+salloc --partition=req-576 --gres=gpu:a100:1 --cpus-per-task=16 --mem=64G --time=02:00:00
+srun --jobid=<job-id> --pty bash
 conda activate genmol
 bash poc/slurm/run_interactive.sh          # data prep -> fine-tune -> evaluate
 # SMOKE=1 bash poc/slurm/run_interactive.sh  # quick end-to-end test (2 epochs, 100 samples)
