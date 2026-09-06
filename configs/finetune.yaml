@@ -1,0 +1,34 @@
+# Fine-tuning overrides for the GenMol PoC (Delaney / ESOL domain).
+# Loaded by poc/scripts/finetune.py and merged on top of genmol/configs/base.yaml.
+# Only the fields that differ from base.yaml for a single-A100 fine-tuning run are set here.
+
+# Path to the SAFE training file produced by prepare_data.py (set via CLI or here).
+data: ??? # e.g. poc/outputs/data/train.safe
+
+loader:
+  global_batch_size: 64  # ~900 train mols -> ~14 steps/epoch (128 gave only ~7, too coarse)
+  num_workers: 8
+
+optim:
+  lr: 1.0e-4            # lower LR than pretraining (3e-4) to adapt, not overwrite
+  num_warmup_steps: 50  # ~3-4 epochs of warmup at this size (100 was ~14 epochs)
+
+training:
+  ema: 0.99              # faster tracking than the pretraining decay of 0.9999
+
+trainer:
+  devices: 1            # single A100
+  max_epochs: 25        # run the full 25 epochs (patience defaults to 25, so no early stop)
+  precision: bf16
+  log_every_n_steps: 1  # small dataset (~14 steps/epoch) -> log every step for full curves
+  check_val_every_n_epoch: 1   # validate after every training epoch
+
+validation:
+  time_samples: 4       # average independent diffusion times to stabilize early stopping
+
+callback:
+  every_n_epochs: 1   # periodic checkpoint after every epoch
+
+# The PoC defaults to the V2 (extended/bracket SAFE) model: finetune.py enables
+# training.use_bracket_safe=True and grows model.vocab_size by 2 to match model_v2.ckpt.
+# Pass --no-use-bracket-safe (with model.ckpt) to fine-tune V1 instead.
