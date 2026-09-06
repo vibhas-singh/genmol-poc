@@ -672,10 +672,10 @@ Freezing the first 9 layers still achieved meaningful domain adaptation, improvi
 | **Recommended**           | —                               | **Original or Lower LR**                              | Frozen run not preferred                           |
 
 
+## Final Conclusion
+The PoC demonstrates that NVIDIA GenMol can be successfully fine-tuned on a small, focused molecular dataset using a single A100 GPU to shift generation toward the target chemical domain while retaining strong generative quality. The selected full fine-tuning checkpoint improved QED from 0.572 → 0.664, SA from 2.394 → 1.765, drug-like fraction from 34.1% → 41.7%, nearest-training similarity from 0.203 → 0.289, and FCD from 24.44 → 22.40, while maintaining 97.5% validity and 85.0% novelty.
 
-
-
-
+The main trade-off was a reduction in uniqueness and diversity, which is expected when adapting a large pretrained generative model to only ~950 training molecules. Learning-rate and layer-freezing ablations showed that a lower learning rate better preserves novelty and diversity, whereas stronger full fine-tuning provides greater domain specialization; freezing the first nine layers did not improve the overall trade-off. Overall, the PoC validates the approach and shows that GenMol can be effectively adapted to a customer-specific chemical space without collapsing into memorization, with further gains likely from larger and more diverse datasets, controlled generation, scaffold-aware evaluation, and downstream property/ADMET or docking-based optimization.
 
 
 ## Metric definitions
