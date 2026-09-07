@@ -175,6 +175,7 @@ genmol-poc/
 ├── data/
 │   └── delaney-processed.csv         # raw dataset (external to the model repo)
 ├── images/                           # result figures referenced by this README
+├── docs/                             # presentation decks and PDF exports
 ├── models/                           # pretrained checkpoints (from NGC)
 │   ├── genmol_v1_v1.0/model.ckpt
 │   └── genmol_v2_v1.0/model_v2.ckpt
